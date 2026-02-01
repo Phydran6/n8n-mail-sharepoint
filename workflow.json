@@ -1,0 +1,255 @@
+{
+  "name": "Mail Attachments to SharePoint (with OCR)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "minutes"}]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-6656, 720],
+      "id": "schedule-trigger",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-6656, 944],
+      "id": "manual-trigger",
+      "name": "Manueller Start"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "limit": 1,
+        "filtersUI": {
+          "values": {
+            "filters": {
+              "hasAttachments": true,
+              "foldersToInclude": ["{{OUTLOOK_INBOX_FOLDER_ID}}"]
+            }
+          }
+        },
+        "options": {"downloadAttachments": true}
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [-6432, 832],
+      "id": "get-mails",
+      "name": "Mails mit Anhängen holen",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "{{OUTLOOK_CREDENTIAL_ID}}",
+          "name": "Microsoft Outlook account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Finde die neueste Mail die ein Attachment hat\nconst mails = $input.all();\n\nmails.sort((a, b) => {\n  const dateA = new Date(a.json.receivedDateTime || 0);\n  const dateB = new Date(b.json.receivedDateTime || 0);\n  return dateB - dateA;\n});\n\nfor (const mail of mails) {\n  const binary = mail.binary || {};\n  \n  for (const [key, data] of Object.entries(binary)) {\n    const filename = data.fileName || '';\n    const mimeType = data.mimeType || '';\n    \n    const isInlineImage = mimeType.startsWith('image/') && data.fileSize < 10000;\n    const isCalendar = filename.endsWith('.ics');\n    \n    if (isInlineImage || isCalendar) continue;\n    \n    const isPdf = filename.toLowerCase().endsWith('.pdf') || mimeType === 'application/pdf';\n    \n    return [{\n      json: {\n        mailId: mail.json.id,\n        mailSubject: mail.json.subject,\n        filename: filename,\n        isPdf: isPdf,\n        mimeType: mimeType,\n        binaryKey: key\n      },\n      binary: { data: data }\n    }];\n  }\n}\n\nreturn [];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-6208, 832],
+      "id": "find-attachment",
+      "name": "Erste Mail mit Attachment finden"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {"caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 3},
+          "conditions": [{
+            "id": "check-pdf",
+            "leftValue": "={{ $json.isPdf }}",
+            "rightValue": "",
+            "operator": {"type": "boolean", "operation": "true", "singleValue": true}
+          }],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-6000, 832],
+      "id": "if-pdf",
+      "name": "If PDF"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "{{STIRLING_PDF_URL}}/api/v1/misc/ocr-pdf",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "Accept", "value": "application/pdf"}]},
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {"parameterType": "formBinaryData", "name": "fileInput", "inputDataFieldName": "data"},
+            {"name": "languages", "value": "deu"},
+            {"name": "sidecar", "value": "false"},
+            {"name": "deskew", "value": "true"},
+            {"name": "clean", "value": "true"},
+            {"name": "ocrType", "value": "skip-text"}
+          ]
+        },
+        "options": {"response": {"response": {"responseFormat": "file"}}, "timeout": 120000}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [-5760, 720],
+      "id": "ocr-pdf",
+      "name": "OCR via Stirling-PDF",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const attachmentInfo = $('Erste Mail mit Attachment finden').first();\nconst originalName = attachmentInfo.json.filename;\nconst mailId = attachmentInfo.json.mailId;\n\nreturn {\n  json: { filename: originalName, mailId: mailId },\n  binary: $input.first().binary\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-5552, 720],
+      "id": "restore-filename",
+      "name": "OCR Dateiname wiederherstellen"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "x-api-key", "value": "{{ANTHROPIC_API_KEY}}"},
+            {"name": "anthropic-version", "value": "2023-06-01"},
+            {"name": "content-type", "value": "application/json"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-20250514\",\n  \"max_tokens\": 50,\n  \"messages\": [{\n    \"role\": \"user\",\n    \"content\": \"Analysiere diesen Dateinamen und gib NUR einen passenden Ordnernamen zurück (ein Wort, deutsch, Plural). Kategorien z.B.: Rechnungen, Vertraege, Angebote, Lieferscheine, Kontoauszuege, Versicherungen, Behoerden, Sonstiges. Keine Umlaute, keine Erklärung.\\n\\nDateiname: {{ $json.filename }}\"\n  }]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [-5328, 832],
+      "id": "ai-categorize",
+      "name": "KI Analyse des Attachments",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{SHAREPOINT_SITE_URL}}/_api/web/folders/add('{{SHAREPOINT_DMS_PATH}}/{{ $json.content[0].text }}')",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "microsoftSharePointOAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "Accept", "value": "application/json;odata=verbose"}]},
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [-5104, 832],
+      "id": "create-folder",
+      "name": "Ordner erstellen (falls nicht existiert)",
+      "credentials": {
+        "microsoftSharePointOAuth2Api": {
+          "id": "{{SHAREPOINT_CREDENTIAL_ID}}",
+          "name": "Microsoft SharePoint account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "let binaryData;\nlet filename;\nlet mailId;\n\ntry {\n  const ocrItem = $('OCR Dateiname wiederherstellen').first();\n  if (ocrItem && ocrItem.binary && ocrItem.binary.data) {\n    binaryData = ocrItem.binary;\n    filename = ocrItem.json.filename;\n    mailId = ocrItem.json.mailId;\n  } else {\n    throw new Error('No OCR data');\n  }\n} catch (e) {\n  const item = $('Erste Mail mit Attachment finden').first();\n  binaryData = item.binary;\n  filename = item.json.filename;\n  mailId = item.json.mailId;\n}\n\nconst category = $('KI Analyse des Attachments').first().json.content[0].text;\n\nreturn {\n  json: { category: category, filename: filename, mailId: mailId },\n  binary: binaryData\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-4880, 832],
+      "id": "merge-data",
+      "name": "Daten zusammenführen",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{SHAREPOINT_SITE_URL}}/_api/web/GetFolderByServerRelativeUrl('{{SHAREPOINT_DMS_PATH}}/{{ $json.category }}')/Files/add(url='{{ $json.filename }}',overwrite=true)",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "microsoftSharePointOAuth2Api",
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [-4656, 832],
+      "id": "upload-sharepoint",
+      "name": "Sharepoint Attachment upload",
+      "credentials": {
+        "microsoftSharePointOAuth2Api": {
+          "id": "{{SHAREPOINT_CREDENTIAL_ID}}",
+          "name": "Microsoft SharePoint account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "move",
+        "messageId": {"__rl": true, "value": "={{ $('Erste Mail mit Attachment finden').first().json.mailId }}", "mode": "id"},
+        "folderId": {"__rl": true, "value": "{{OUTLOOK_SUCCESS_FOLDER_ID}}", "mode": "id"}
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [-4448, 832],
+      "id": "move-success",
+      "name": "Mail -> n8n-erfolgreich",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "{{OUTLOOK_CREDENTIAL_ID}}",
+          "name": "Microsoft Outlook account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "move",
+        "messageId": {"__rl": true, "value": "={{ $('Erste Mail mit Attachment finden').first().json.mailId }}", "mode": "id"},
+        "folderId": {"__rl": true, "value": "{{OUTLOOK_ERROR_FOLDER_ID}}", "mode": "id"}
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [-4448, 1040],
+      "id": "move-error",
+      "name": "Mail -> n8n-fehler",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "{{OUTLOOK_CREDENTIAL_ID}}",
+          "name": "Microsoft Outlook account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {"main": [[{"node": "Mails mit Anhängen holen", "type": "main", "index": 0}]]},
+    "Manueller Start": {"main": [[{"node": "Mails mit Anhängen holen", "type": "main", "index": 0}]]},
+    "Mails mit Anhängen holen": {"main": [[{"node": "Erste Mail mit Attachment finden", "type": "main", "index": 0}]]},
+    "Erste Mail mit Attachment finden": {"main": [[{"node": "If PDF", "type": "main", "index": 0}]]},
+    "If PDF": {"main": [[{"node": "OCR via Stirling-PDF", "type": "main", "index": 0}], [{"node": "KI Analyse des Attachments", "type": "main", "index": 0}]]},
+    "OCR via Stirling-PDF": {"main": [[{"node": "OCR Dateiname wiederherstellen", "type": "main", "index": 0}], [{"node": "Mail -> n8n-fehler", "type": "main", "index": 0}]]},
+    "OCR Dateiname wiederherstellen": {"main": [[{"node": "KI Analyse des Attachments", "type": "main", "index": 0}]]},
+    "KI Analyse des Attachments": {"main": [[{"node": "Ordner erstellen (falls nicht existiert)", "type": "main", "index": 0}], [{"node": "Mail -> n8n-fehler", "type": "main", "index": 0}]]},
+    "Ordner erstellen (falls nicht existiert)": {"main": [[{"node": "Daten zusammenführen", "type": "main", "index": 0}]]},
+    "Daten zusammenführen": {"main": [[{"node": "Sharepoint Attachment upload", "type": "main", "index": 0}], [{"node": "Mail -> n8n-fehler", "type": "main", "index": 0}]]},
+    "Sharepoint Attachment upload": {"main": [[{"node": "Mail -> n8n-erfolgreich", "type": "main", "index": 0}], [{"node": "Mail -> n8n-fehler", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1"},
+  "meta": {"templateCredsSetupCompleted": false},
+  "tags": []
+}
