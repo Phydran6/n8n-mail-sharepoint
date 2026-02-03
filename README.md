@@ -1,4 +1,4 @@
-# n8n Mail Attachments to SharePoint
+# n8n Mail Attachments to SharePoint V1
 
 Automatisierter n8n Workflow: E-Mail-Anhänge aus Outlook abholen, OCR für PDFs, KI-Kategorisierung, Upload zu SharePoint.
 
